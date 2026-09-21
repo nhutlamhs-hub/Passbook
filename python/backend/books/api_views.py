@@ -1,5 +1,10 @@
 from decimal import Decimal, InvalidOperation
+from contextlib import nullcontext
+import logging
+from time import perf_counter
 
+from django.conf import settings
+from django.db import connection
 from django.db import transaction
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
@@ -15,6 +20,28 @@ from .pagination import BookPagination
 from .serializers import BookImageSerializer, BookSerializer, BookWriteSerializer, FavoriteSerializer
 
 
+logger = logging.getLogger(__name__)
+
+
+class _BookQueryTiming:
+    def __init__(self):
+        self.count_ms = 0.0
+        self.data_ms = 0.0
+        self.query_count = 0
+
+    def execute(self, execute, sql, params, many, context):
+        started = perf_counter()
+        try:
+            return execute(sql, params, many, context)
+        finally:
+            duration_ms = (perf_counter() - started) * 1000
+            self.query_count += 1
+            if 'COUNT(' in sql.upper():
+                self.count_ms += duration_ms
+            else:
+                self.data_ms += duration_ms
+
+
 def optimized_books_queryset():
     return (
         Book.objects
@@ -27,6 +54,7 @@ def optimized_books_queryset():
 
 class BookListView(APIView):
     def get(self, request):
+        started = perf_counter()
         queryset = optimized_books_queryset().filter(status='available')
         query_params = request.query_params
 
@@ -38,7 +66,7 @@ class BookListView(APIView):
                 | Q(subject__name__icontains=search)
                 | Q(subject__code__icontains=search)
                 | Q(category__name__icontains=search)
-            ).distinct()
+            )
 
         queryset = self._filter_integer(queryset, query_params, 'subject_id', 'subject_id')
         queryset = self._filter_integer(queryset, query_params, 'category_id', 'category_id')
@@ -73,8 +101,29 @@ class BookListView(APIView):
         queryset = queryset.order_by(sort_options[sort], '-id')
 
         paginator = BookPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        return paginator.get_paginated_response(BookSerializer(page, many=True).data)
+        timing = _BookQueryTiming()
+        with connection.execute_wrapper(timing) if settings.BOOKS_TIMING_ENABLED else nullcontext():
+            pagination_started = perf_counter()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            books = list(page)
+            pagination_ms = (perf_counter() - pagination_started) * 1000
+            serialization_started = perf_counter()
+            serialized = BookSerializer(books, many=True).data
+            serialization_ms = (perf_counter() - serialization_started) * 1000
+
+        if settings.BOOKS_TIMING_ENABLED:
+            logger.info(
+                'books_timing path=%s count_ms=%.2f data_sql_ms=%.2f '
+                'query_count=%d pagination_ms=%.2f serialization_ms=%.2f total_ms=%.2f',
+                request.get_full_path(),
+                timing.count_ms,
+                timing.data_ms,
+                timing.query_count,
+                pagination_ms,
+                serialization_ms,
+                (perf_counter() - started) * 1000,
+            )
+        return paginator.get_paginated_response(serialized)
 
     @staticmethod
     def _filter_integer(queryset, query_params, parameter, lookup):

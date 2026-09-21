@@ -70,9 +70,11 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll("#filter-school, #filter-subject, #filter-category, #filter-location, #sort-books, input[name='condition']").forEach((el) => el.addEventListener("change", reload));
     document.querySelector("[data-search-submit]").addEventListener("click", reload);
     document.querySelector("#catalog-query").addEventListener("keydown", (event) => { if (event.key === "Enter") reload(); });
+    let priceReloadTimer;
     document.querySelector("#filter-price").addEventListener("input", (event) => {
         document.querySelector("#price-output").textContent = formatPrice(Number(event.target.value));
-        reload();
+        clearTimeout(priceReloadTimer);
+        priceReloadTimer = setTimeout(reload, 350);
     });
     document.querySelector("#filter-min-price").addEventListener("change", reload);
     document.querySelector("[data-reset-filters]").addEventListener("click", () => { location.href = "books.html"; });
